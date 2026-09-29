@@ -1,0 +1,60 @@
+# GitLab's OIDC configuration is:
+# id_tokens:
+#   SIGSTORE_ID_TOKEN:
+#     aud: sigstore
+# Cosign automatically uses that token when it is available as SIGSTORE_ID_TOKEN
+# Add these as masked/protected CI/CD variables:
+# GHCR_USERNAME
+# GHCR_TOKEN - with permission to write packages to the relevant GHCR namespace
+# GitLab Self-Managed installations require a self-hosted Sigstore/Fulcio/Rekor setup
+
+stages:
+  - build
+
+variables:
+  IMAGE_NAME: "ghcr.io/myorg/myimage"
+  IMAGE_TAG: "$CI_COMMIT_SHA"
+  DOCKER_TLS_CERTDIR: "/certs"
+
+build-push-sign:
+  stage: build
+
+  image: docker:27-cli
+
+  services:
+    - name: docker:27-dind
+      command:
+        - "--tls=true"
+
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+
+  before_script:
+    - apk add --no-cache cosign
+    - docker login ghcr.io
+        --username "$GHCR_USERNAME"
+        --password-stdin <<< "$GHCR_TOKEN"
+
+  script:
+    # Build
+    - docker build --pull -t "$IMAGE_NAME:$IMAGE_TAG" .
+
+    # Push
+    - docker push "$IMAGE_NAME:$IMAGE_TAG"
+
+    # Resolve the immutable digest
+    - IMAGE_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_NAME:$IMAGE_TAG")"
+
+    - echo "Image digest: $IMAGE_DIGEST"
+
+    # Keyless Cosign signing using GitLab OIDC
+    - |
+      COSIGN_YES=true cosign sign "$IMAGE_DIGEST"
+
+    # Verify
+    - |
+      cosign verify "$IMAGE_DIGEST" \
+        --certificate-identity "$CI_PROJECT_URL//.gitlab-ci.yml@refs/heads/$CI_COMMIT_REF_NAME" \
+        --certificate-oidc-issuer "$CI_SERVER_URL"
+
